@@ -163,6 +163,7 @@ app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime
 const SYSTEM_PROMPT = `Você é um agente de automação GitHub para o repositório ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}.
 REGRAS:
 - Leia TÍTULO, DESCRIÇÃO e COMENTÁRIOS da issue.
+- Ao EDITAR arquivos existentes, você receberá o CONTEÚDO ATUAL do arquivo para fazer alterações precisas.
 - Identifique tarefas (criar, modificar, deletar arquivos).
 - NÃO peça confirmação.
 - RESPONDA APENAS JSON VÁLIDO neste schema:
@@ -217,12 +218,31 @@ async function fetchIssueComments(number) {
   return res.ok ? res.json() : [];
 }
 
-async function getFileSha(path) {
+async function getFileContent(path) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}?ref=${CONFIG.BRANCH}`;
-  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}` } });
+  const res = await fetch(url, { 
+    headers: { 
+      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
+      'Accept': 'application/vnd.github+json'
+    } 
+  });
+  
   if (!res.ok) return null;
+  
   const data = await res.json();
-  return data.sha;
+  
+  // Decodifica o conteúdo de base64 para texto
+  if (data.content) {
+    const content = Buffer.from(data.content, 'base64').toString('utf-8');
+    return { content, sha: data.sha };
+  }
+  
+  return null;
+}
+
+async function getFileSha(path) {
+  const fileData = await getFileContent(path);
+  return fileData ? fileData.sha : null;
 }
 
 async function putFile(path, content, message, sha = null) {
@@ -271,7 +291,7 @@ async function updateIssueState(number, state, reason) {
 }
 
 // ============================================================================
-// 🤖 LÓGICA PRINCIPAL
+// 🤖 LÓGICA PRINCIPAL COM CONTEXTO DE ARQUIVOS
 // ============================================================================
 
 function extractJson(text) {
@@ -279,6 +299,14 @@ function extractJson(text) {
     const match = text.match(/```json([\s\S]*?)```/i);
     return JSON.parse(match ? match[1] : text);
   } catch (e) { return null; }
+}
+
+async function detectFilesToRead(issue, comments) {
+  // Detecta nomes de arquivos mencionados na issue ou comentários
+  const text = `${issue.title} ${issue.body} ${comments.map(c => c.body).join(' ')}`;
+  const filePatterns = /([\w\-\.]+\.(html|css|js|json|md|txt|py|java|cpp|c|h|php|rb|go|rs|ts|jsx|tsx|vue|xml|yaml|yml))/gi;
+  const matches = text.match(filePatterns);
+  return matches ? [...new Set(matches)] : [];
 }
 
 async function processIssue(issue) {
@@ -290,7 +318,23 @@ async function processIssue(issue) {
     const comments = await fetchIssueComments(issue.number);
     const commentsText = comments.map(c => `${c.user.login}: ${c.body}`).join('\n');
     
-    const prompt = `ISSUE #${issue.number}\nTítulo: ${issue.title}\nDesc: ${issue.body}\nComentários:\n${commentsText}\n\nGere o JSON de ação.`;
+    // NOVO: Detecta e lê arquivos mencionados
+    const mentionedFiles = await detectFilesToRead(issue, comments);
+    let fileContexts = '';
+    
+    if (mentionedFiles.length > 0) {
+      addLog('📚', `Lendo ${mentionedFiles.length} arquivo(s) para contexto...`);
+      
+      for (const filename of mentionedFiles) {
+        const fileData = await getFileContent(filename);
+        if (fileData) {
+          fileContexts += `\n\n--- CONTEÚDO ATUAL DE ${filename} ---\n${fileData.content}\n--- FIM DE ${filename} ---\n`;
+          addLog('📄', `Arquivo lido: ${filename}`);
+        }
+      }
+    }
+    
+    const prompt = `ISSUE #${issue.number}\nTítulo: ${issue.title}\nDesc: ${issue.body}\nComentários:\n${commentsText}${fileContexts}\n\nGere o JSON de ação.`;
     
     const result = await model.generateContent(prompt);
     const plan = extractJson(result.response.text());
@@ -313,10 +357,17 @@ async function processIssue(issue) {
         botStatus.stats.created++;
       } else if (action.type === 'update_file') {
         const sha = await getFileSha(action.path);
-        await putFile(action.path, action.content, `Update ${action.path} #${issue.number}`, sha);
-        logs.push(`- Editado: \`${action.path}\``);
-        addLog('✏️', `Arquivo atualizado: ${action.path}`);
-        botStatus.stats.updated++;
+        if (!sha) {
+          addLog('⚠️', `Arquivo ${action.path} não existe, criando...`);
+          await putFile(action.path, action.content, `Criar ${action.path} #${issue.number}`);
+          logs.push(`- Criado: \`${action.path}\` (não existia)`);
+          botStatus.stats.created++;
+        } else {
+          await putFile(action.path, action.content, `Update ${action.path} #${issue.number}`, sha);
+          logs.push(`- Editado: \`${action.path}\``);
+          addLog('✏️', `Arquivo atualizado: ${action.path}`);
+          botStatus.stats.updated++;
+        }
       } else if (action.type === 'delete_file') {
         await deleteFile(action.path, `Delete ${action.path} #${issue.number}`);
         logs.push(`- Deletado: \`${action.path}\``);
