@@ -1,6 +1,22 @@
 # 🤖 GitHub AI Automation Bot
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sonyddr666/github-ai-automation-bot)
+
 Bot de automação que processa issues do GitHub usando Gemini AI para executar mudanças automaticamente no repositório **sonyddr666/teste**.
+
+---
+
+## 🚀 Deploy Rápido (1 Clique)
+
+1. Clique no botão **"Deploy to Render"** acima ⬆️
+2. Faça login no Render (ou crie conta gratuita)
+3. Configure apenas 2 variáveis:
+   - **GITHUB_TOKEN** → [Gerar aqui](https://github.com/settings/tokens) (scope: `repo`)
+   - **GEMINI_API_KEY** → [Gerar aqui](https://aistudio.google.com/app/apikey)
+4. Clique em **"Apply"**
+5. Pronto! 🎉
+
+---
 
 ## 🎯 O Que Ele Faz
 
@@ -15,13 +31,11 @@ Bot de automação que processa issues do GitHub usando Gemini AI para executar 
 5. **Comenta na issue** com resumo das ações executadas
 6. **Fecha a issue** automaticamente quando completo
 
-## 🚀 Deploy no Render
+---
 
-### Passo 1: Configure as Variáveis de Ambiente
+## 🔑 Como Gerar os Tokens
 
-Você precisa de 2 variáveis obrigatórias:
-
-#### 🔑 GITHUB_TOKEN
+### GITHUB_TOKEN
 1. Acesse: https://github.com/settings/tokens
 2. Clique em **"Generate new token (classic)"**
 3. Dê um nome (ex: "Bot Automation")
@@ -29,47 +43,13 @@ Você precisa de 2 variáveis obrigatórias:
 5. Clique em **"Generate token"**
 6. **Copie o token** (você não verá ele novamente!)
 
-#### 🤖 GEMINI_API_KEY
+### GEMINI_API_KEY
 1. Acesse: https://aistudio.google.com/app/apikey
 2. Clique em **"Create API key"**
 3. Escolha um projeto ou crie um novo
 4. **Copie a chave** gerada
 
-### Passo 2: Deploy no Render
-
-1. Acesse: https://render.com
-2. Clique em **"New +"** → **"Web Service"** ou **"Background Worker"**
-3. Conecte este repositório: `sonyddr666/github-ai-automation-bot`
-4. Configure:
-   - **Name:** `github-ai-bot` (ou qualquer nome)
-   - **Region:** Escolha a mais próxima
-   - **Branch:** `main`
-   - **Build Command:** `npm install`
-   - **Start Command:** `npm start`
-5. Adicione as **Environment Variables:**
-   ```
-   GITHUB_TOKEN=ghp_seu_token_aqui
-   GEMINI_API_KEY=sua_chave_aqui
-   ```
-6. (Opcional) Adicione mais variáveis:
-   ```
-   CHECK_INTERVAL=300000    # 5 minutos em ms (padrão)
-   BRANCH=main              # branch alvo (padrão)
-   DRY_RUN=false            # true para testar sem executar
-   ```
-7. Clique em **"Create Web Service"**
-
-### Passo 3: Verificar se Está Funcionando
-
-1. Vá em **Logs** no painel do Render
-2. Você verá:
-   ```
-   🤖 BOT DE AUTOMAÇÃO GITHUB + GEMINI AI
-   Repositório: sonyddr666/teste
-   Branch: main
-   Intervalo: 300s (5 minutos)
-   ```
-3. A cada 5 minutos verá: `🔄 Verificação iniciada...`
+---
 
 ## 📝 Como Usar
 
@@ -104,6 +84,12 @@ Descrição:
 3. Deletar old-styles.css
 ```
 
+#### Exemplo 5: Página Criativa 🎭
+```
+Título: Criar bomdia.html estilo vilão
+Descrição: Crie uma página bomdia.html com a cara de vilão de filme
+```
+
 ### O Que Acontece Depois
 
 1. ✅ Bot detecta a issue (em até 5 minutos)
@@ -123,6 +109,8 @@ Descrição:
    ```
 5. 🔒 Issue é fechada automaticamente
 
+---
+
 ## 🛠️ Variáveis de Ambiente
 
 | Variável | Obrigatória | Padrão | Descrição |
@@ -132,6 +120,8 @@ Descrição:
 | `CHECK_INTERVAL` | ❌ Não | `300000` | Intervalo em ms (5 min) |
 | `BRANCH` | ❌ Não | `main` | Branch onde fazer commits |
 | `DRY_RUN` | ❌ Não | `false` | `true` para testar sem executar |
+
+---
 
 ## 📊 Logs e Monitoramento
 
@@ -154,6 +144,8 @@ O bot exibe logs detalhados:
 ✅ Verificação concluída em 8.43s
 ```
 
+---
+
 ## 🔧 Modo de Teste (DRY_RUN)
 
 Para testar sem executar ações reais:
@@ -169,6 +161,8 @@ O bot irá:
 - ❌ NÃO executar ações
 - ❌ NÃO comentar
 - ❌ NÃO fechar issues
+
+---
 
 ## ⚠️ Troubleshooting
 
@@ -188,6 +182,8 @@ O bot irá:
 ### Erro "Rate Limit"
 - ✅ O bot tem delay de 1s entre ações
 - ✅ Se persistir, aumente `CHECK_INTERVAL` para 600000 (10 min)
+
+---
 
 ## 🎨 Arquitetura
 
@@ -223,6 +219,18 @@ O bot irá:
     │  gera plano │
     └─────────────┘
 ```
+
+---
+
+## 🔗 Links Úteis
+
+- [Repositório GitHub](https://github.com/sonyddr666/github-ai-automation-bot)
+- [Repositório Alvo (teste)](https://github.com/sonyddr666/teste)
+- [Documentação Render](https://render.com/docs)
+- [GitHub API Docs](https://docs.github.com/en/rest)
+- [Gemini API Docs](https://ai.google.dev/gemini-api/docs)
+
+---
 
 ## 📄 Licença
 

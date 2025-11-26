@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: github-ai-automation-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CHECK_INTERVAL
+        value: 300000
+      - key: BRANCH
+        value: main
+      - key: DRY_RUN
+        value: false
