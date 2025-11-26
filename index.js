@@ -1,5 +1,12 @@
 import fetch from 'node-fetch';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import http from 'http';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ============================================================================
 // CONFIGURAÇÃO
@@ -9,9 +16,10 @@ const CONFIG = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   REPO_OWNER: 'sonyddr666',
   REPO_NAME: 'teste',
-  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10), // 5 min (300000ms)
+  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10),
   BRANCH: process.env.BRANCH || 'main',
-  DRY_RUN: process.env.DRY_RUN === 'true' // Para testes sem executar ações
+  DRY_RUN: process.env.DRY_RUN === 'true',
+  PORT: parseInt(process.env.PORT || '3000', 10)
 };
 
 // Validação de variáveis obrigatórias
@@ -22,6 +30,32 @@ if (missing.length) {
   console.error('Configure: GITHUB_TOKEN, GEMINI_API_KEY');
   process.exit(1);
 }
+
+// ============================================================================
+// SERVIDOR WEB PARA DASHBOARD
+// ============================================================================
+const server = http.createServer((req, res) => {
+  if (req.url === '/' || req.url === '/index.html') {
+    try {
+      const html = readFileSync(join(__dirname, 'public', 'index.html'), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Erro ao carregar dashboard');
+    }
+  } else if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'online', timestamp: new Date().toISOString() }));
+  } else {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
+});
+
+server.listen(CONFIG.PORT, () => {
+  console.log(`🌐 Dashboard disponível em: http://localhost:${CONFIG.PORT}`);
+});
 
 // ============================================================================
 // SYSTEM PROMPT PARA O GEMINI
@@ -110,7 +144,6 @@ const model = genAI.getGenerativeModel({
   systemInstruction: SYSTEM_PROMPT
 });
 
-// Cache de issues já processadas nesta execução
 const processedIssues = new Set();
 
 // ============================================================================
@@ -132,7 +165,6 @@ async function fetchOpenIssues() {
   }
   
   const data = await res.json();
-  // Filtrar apenas issues (não pull requests)
   return data.filter(i => !i.pull_request);
 }
 
@@ -286,13 +318,10 @@ async function updateIssueState(number, state, stateReason) {
 
 function extractJson(text) {
   try {
-    // Tentar extrair JSON de blocos de código
     const codeBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
     if (codeBlockMatch) {
       return JSON.parse(codeBlockMatch[1].trim());
     }
-    
-    // Tentar parsear diretamente
     return JSON.parse(text.trim());
   } catch (e) {
     console.error('❌ Erro ao parsear JSON do Gemini:', e.message);
@@ -347,11 +376,9 @@ async function processIssue(issue) {
   console.log(`${'='.repeat(60)}`);
 
   try {
-    // 1. Buscar comentários
     const comments = await fetchIssueComments(issue.number);
     console.log(`💬 ${comments.length} comentário(s) encontrado(s)`);
 
-    // 2. Planejar com Gemini
     const plan = await planIssueWithAI(issue, comments);
 
     if (CONFIG.DRY_RUN) {
@@ -361,7 +388,6 @@ async function processIssue(issue) {
       return;
     }
 
-    // 3. Executar ações
     const created = [];
     const updated = [];
     const deleted = [];
@@ -412,7 +438,6 @@ async function processIssue(issue) {
           console.warn(`⚠️  Tipo de ação não suportado: ${type}`);
         }
 
-        // Delay para evitar rate limit
         await new Promise(r => setTimeout(r, 1000));
         
       } catch (e) {
@@ -422,7 +447,6 @@ async function processIssue(issue) {
       }
     }
 
-    // 4. Montar comentário resumo
     let summaryComment = `## 🤖 Automação Executada\n\n`;
     summaryComment += `${plan.final_comment}\n\n`;
     summaryComment += `---\n\n`;
@@ -460,11 +484,9 @@ async function processIssue(issue) {
     const totalActions = created.length + updated.length + deleted.length;
     summaryComment += `\n_Processado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}_`;
 
-    // 5. Comentar na issue
     await commentOnIssue(issue.number, summaryComment);
     console.log(`💬 Comentário adicionado à issue #${issue.number}`);
 
-    // 6. Fechar issue se indicado
     if (plan.close_issue && totalActions > 0) {
       await updateIssueState(issue.number, 'closed', plan.state_reason || 'completed');
       console.log(`🔒 Issue #${issue.number} fechada com estado: ${plan.state_reason || 'completed'}`);
@@ -532,22 +554,21 @@ Repositório: ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}
 Branch: ${CONFIG.BRANCH}
 Intervalo: ${CONFIG.CHECK_INTERVAL / 1000}s (${CONFIG.CHECK_INTERVAL / 60000} minutos)
 Dry Run: ${CONFIG.DRY_RUN ? 'ATIVADO' : 'DESATIVADO'}
+Porta Web: ${CONFIG.PORT}
 ${'═'.repeat(70)}
 `);
 
-// Primeira execução imediata
 await loop();
-
-// Loop recorrente
 setInterval(loop, CONFIG.CHECK_INTERVAL);
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('\n🛑 Recebido sinal de encerramento (SIGTERM)...');
+  server.close();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('\n🛑 Recebido sinal de encerramento (SIGINT)...');
+  server.close();
   process.exit(0);
 });
