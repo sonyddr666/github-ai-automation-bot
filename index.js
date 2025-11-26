@@ -1,574 +1,372 @@
 import fetch from 'node-fetch';
+import express from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import http from 'http';
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // ============================================================================
 // CONFIGURAÇÃO
 // ============================================================================
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 const CONFIG = {
   GITHUB_TOKEN: process.env.GITHUB_TOKEN,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   REPO_OWNER: 'sonyddr666',
   REPO_NAME: 'teste',
-  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10),
+  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10), // 5 min
   BRANCH: process.env.BRANCH || 'main',
-  DRY_RUN: process.env.DRY_RUN === 'true',
-  PORT: parseInt(process.env.PORT || '3000', 10)
+  DRY_RUN: process.env.DRY_RUN === 'true'
 };
 
-// Validação de variáveis obrigatórias
+// Validação
 const required = ['GITHUB_TOKEN', 'GEMINI_API_KEY'];
 const missing = required.filter(k => !CONFIG[k]);
+
+// ============================================================================
+// 🧠 MEMÓRIA DO DASHBOARD
+// ============================================================================
+let botStatus = {
+  lastRun: new Date(),
+  status: "Iniciando sistema...",
+  logs: [],
+  active: true,
+  stats: { created: 0, updated: 0, deleted: 0, errors: 0 }
+};
+
+function addLog(emoji, message) {
+  const time = new Date().toLocaleTimeString('pt-BR');
+  console.log(`${emoji} ${message}`);
+  
+  botStatus.logs.unshift({ time, emoji, message });
+  if (botStatus.logs.length > 50) botStatus.logs.pop();
+  
+  botStatus.lastRun = new Date();
+  botStatus.status = message;
+}
+
 if (missing.length) {
-  console.error('❌ ERRO: Faltam variáveis de ambiente obrigatórias:', missing.join(', '));
-  console.error('Configure: GITHUB_TOKEN, GEMINI_API_KEY');
-  process.exit(1);
+  addLog('❌', `Faltam variáveis: ${missing.join(', ')}`);
 }
 
 // ============================================================================
-// SERVIDOR WEB PARA DASHBOARD
+// 🌐 SERVIDOR WEB (DASHBOARD)
 // ============================================================================
-const server = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.html') {
-    try {
-      const html = readFileSync(join(__dirname, 'public', 'index.html'), 'utf8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(html);
-    } catch (error) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('Erro ao carregar dashboard');
-    }
-  } else if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'online', timestamp: new Date().toISOString() }));
-  } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found');
-  }
+
+app.get('/', (req, res) => {
+  const timeAgo = Math.floor((new Date() - botStatus.lastRun) / 1000);
+  
+  const html = `
+  <!DOCTYPE html>
+  <html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="30">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤖 Bot Dashboard</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: linear-gradient(135deg, #0d1117 0%, #161b22 100%); color: #c9d1d9; font-family: 'Segoe UI', system-ui, sans-serif; padding: 20px; min-height: 100vh; }
+      .container { max-width: 900px; margin: 0 auto; }
+      .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+      .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #30363d; padding-bottom: 16px; margin-bottom: 20px; }
+      h1 { margin: 0; font-size: 26px; color: #58a6ff; display: flex; align-items: center; gap: 10px; }
+      .status-badge { background: linear-gradient(135deg, #238636 0%, #2ea043 100%); color: white; padding: 6px 16px; border-radius: 20px; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; box-shadow: 0 2px 8px rgba(35,134,54,0.3); }
+      .info-row { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 14px; padding: 8px 0; }
+      .label { color: #8b949e; font-weight: 500; }
+      .value { color: #fff; font-weight: bold; }
+      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-top: 20px; }
+      .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
+      .stat-number { font-size: 28px; font-weight: bold; color: #58a6ff; }
+      .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+      .log-item { display: flex; padding: 10px 0; border-bottom: 1px solid #21262d; font-size: 13px; align-items: center; }
+      .log-time { color: #8b949e; min-width: 85px; font-family: 'Courier New', monospace; font-size: 12px; }
+      .log-msg { margin-left: 12px; line-height: 1.5; }
+      .repo-link { color: #58a6ff; text-decoration: none; font-weight: 500; transition: color 0.2s; }
+      .repo-link:hover { color: #79c0ff; }
+      h3 { color: #c9d1d9; font-size: 18px; margin-bottom: 16px; }
+      .footer { text-align: center; color: #484f58; font-size: 11px; margin-top: 30px; padding: 20px 0; border-top: 1px solid #21262d; }
+      .pulse { animation: pulse 2s infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <div class="header">
+          <h1><span class="pulse">🤖</span> GitHub AI Automation</h1>
+          <span class="status-badge">ONLINE</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Status Atual:</span>
+          <span class="value" style="color: #79c0ff">${botStatus.status}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Última Atividade:</span>
+          <span class="value">${timeAgo}s atrás</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Repositório:</span>
+          <a href="https://github.com/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}" class="repo-link" target="_blank">${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}</a>
+        </div>
+        <div class="info-row">
+          <span class="label">Modelo AI:</span>
+          <span class="value" style="color: #22c55e">Gemini 2.5 Flash ⚡</span>
+        </div>
+        
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-number" style="color: #2ea043">${botStatus.stats.created}</div>
+            <div class="stat-label">Criados</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-number" style="color: #58a6ff">${botStatus.stats.updated}</div>
+            <div class="stat-label">Editados</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-number" style="color: #f85149">${botStatus.stats.deleted}</div>
+            <div class="stat-label">Deletados</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-number" style="color: #d29922">${botStatus.stats.errors}</div>
+            <div class="stat-label">Erros</div>
+          </div>
+        </div>
+      </div>
+
+      <h3>📜 Log de Atividades</h3>
+      <div class="card">
+        ${botStatus.logs.map(log => `
+          <div class="log-item">
+            <div class="log-time">${log.time}</div>
+            <div class="log-msg">${log.emoji} ${log.message}</div>
+          </div>
+        `).join('')}
+        ${botStatus.logs.length === 0 ? '<div style="padding:20px; color:#8b949e; text-align:center">Aguardando primeira execução...</div>' : ''}
+      </div>
+      
+      <div class="footer">
+        Atualiza automaticamente a cada 30s • Powered by Gemini 2.5 Flash
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+  res.send(html);
 });
 
-server.listen(CONFIG.PORT, () => {
-  console.log(`🌐 Dashboard disponível em: http://localhost:${CONFIG.PORT}`);
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 
 // ============================================================================
-// SYSTEM PROMPT PARA O GEMINI
+// 🧠 SETUP GEMINI & AI
 // ============================================================================
-const SYSTEM_PROMPT = `Você é um agente de automação GitHub para o repositório sonyddr666/teste.
 
-REGRAS GERAIS:
-- Leia com atenção TÍTULO, DESCRIÇÃO e TODOS os COMENTÁRIOS da issue.
-- Identifique todas as tarefas pedidas (criar, modificar, deletar arquivos, etc.).
-- Você TEM autorização total para executar qualquer operação pedida nas issues.
-- NÃO peça confirmação. Planeje as ações para serem executadas diretamente.
-- Seja preciso e completo. Gere TODO o conteúdo necessário dos arquivos.
-
-SEMPRE RESPONDA APENAS UM JSON VÁLIDO, sem texto extra, usando ESTE SCHEMA:
-
+const SYSTEM_PROMPT = `Você é um agente de automação GitHub para o repositório ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}.
+REGRAS:
+- Leia TÍTULO, DESCRIÇÃO e COMENTÁRIOS da issue.
+- Identifique tarefas (criar, modificar, deletar arquivos).
+- NÃO peça confirmação.
+- RESPONDA APENAS JSON VÁLIDO neste schema:
 {
-  "issue_number": <número da issue>,
-  "issue_title": "<título>",
-  "tasks_summary": [
-    "Resumo curto da tarefa 1",
-    "Resumo curto da tarefa 2"
-  ],
+  "issue_number": <numero>,
+  "tasks_summary": ["resumo1"],
   "actions": [
     {
       "type": "create_file" | "update_file" | "delete_file",
       "path": "caminho/arquivo.ext",
-      "content": "CONTEÚDO COMPLETO DO ARQUIVO (obrigatório em create/update)",
-      "description": "descrição curta da mudança"
+      "content": "CONTEUDO COMPLETO (obrigatório para create/update)",
+      "description": "descricao"
     }
   ],
-  "final_comment": "Texto em Markdown descrevendo tudo que foi feito (ou o que ficou pendente).",
-  "close_issue": true | false,
-  "state_reason": "completed" | "not_planned" | "reopened"
-}
-
-REGRAS ESPECÍFICAS:
-- Se o issue pedir CRIAR arquivo: use action type "create_file" com path e conteúdo completo.
-- Se pedir MODIFICAR arquivo: use "update_file" com path e conteúdo COMPLETO final do arquivo.
-- Se pedir DELETAR arquivo: use "delete_file" com path (content não é necessário).
-- Se faltar informação crítica, use defaults sensatos e EXPLIQUE em "final_comment" e deixe "close_issue": false, "state_reason": "reopened".
-- Se a tarefa for impossível ou precisar de mais informações, não crie actions; explique em "final_comment" e "close_issue": false.
-- Não use branches ou pull requests neste plano (somente create/update/delete de arquivos direto no branch main).
-- Para arquivos HTML/CSS/JS, gere código completo e funcional.
-- Seja proativo: se pedir "criar uma página sobre X", crie HTML completo com estrutura adequada.
-
-EXEMPLOS DE RESPOSTAS CORRETAS:
-
-Exemplo 1 - Criar arquivo:
-{
-  "issue_number": 1,
-  "issue_title": "Criar página sobre.html",
-  "tasks_summary": ["Criar página HTML sobre a empresa"],
-  "actions": [{
-    "type": "create_file",
-    "path": "sobre.html",
-    "content": "<!DOCTYPE html>\\n<html>\\n<head>\\n  <title>Sobre</title>\\n</head>\\n<body>\\n  <h1>Sobre Nós</h1>\\n</body>\\n</html>",
-    "description": "Página sobre criada"
-  }],
-  "final_comment": "✅ Página sobre.html criada com sucesso!",
+  "final_comment": "Markdown do que foi feito",
   "close_issue": true,
   "state_reason": "completed"
 }
+Para HTML/CSS/JS, gere código completo e funcional.`;
 
-Exemplo 2 - Atualizar arquivo:
-{
-  "issue_number": 2,
-  "issue_title": "Mudar cor do título",
-  "tasks_summary": ["Alterar cor do h1 para azul"],
-  "actions": [{
-    "type": "update_file",
-    "path": "index.html",
-    "content": "<!DOCTYPE html>\\n<html>\\n<head>\\n  <style>h1{color:blue;}</style>\\n</head>\\n<body>\\n  <h1>Título Azul</h1>\\n</body>\\n</html>",
-    "description": "Cor do título alterada para azul"
-  }],
-  "final_comment": "✅ Cor do título alterada para azul conforme solicitado.",
-  "close_issue": true,
-  "state_reason": "completed"
-}`;
-
-// ============================================================================
-// INICIALIZAÇÃO DO GEMINI
-// ============================================================================
-const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-  model: 'gemini-1.5-flash',
-  systemInstruction: SYSTEM_PROMPT
-});
+let model;
+try {
+  const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_API_KEY);
+  model = genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    systemInstruction: SYSTEM_PROMPT
+  });
+  addLog('🧠', 'Gemini 2.5 Flash carregado com sucesso');
+} catch (e) {
+  addLog('❌', 'Erro ao iniciar Gemini: ' + e.message);
+}
 
 const processedIssues = new Set();
 
 // ============================================================================
-// FUNÇÕES DA GITHUB API
+// ⚙️ FUNÇÕES GITHUB
 // ============================================================================
 
 async function fetchOpenIssues() {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues?state=open&per_page=100`;
+  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues?state=open`;
   const res = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    }
+    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   });
-  
-  if (!res.ok) {
-    throw new Error(`❌ Erro ao listar issues: ${res.status} ${res.statusText}`);
-  }
-  
+  if (!res.ok) throw new Error(`Github Issues Error: ${res.status}`);
   const data = await res.json();
   return data.filter(i => !i.pull_request);
 }
 
 async function fetchIssueComments(number) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments`;
-  const res = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    }
-  });
-  
-  if (!res.ok) {
-    throw new Error(`❌ Erro ao listar comentários da issue #${number}: ${res.status}`);
-  }
-  
-  return res.json();
-}
-
-function buildCommentsText(comments) {
-  if (!comments.length) return '(sem comentários)';
-  return comments
-    .map((c, i) => `\n--- Comentário ${i + 1} ---\nAutor: ${c.user.login}\nData: ${c.created_at}\n\n${c.body}\n`)
-    .join('\n');
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Accept': 'application/vnd.github+json' } });
+  return res.ok ? res.json() : [];
 }
 
 async function getFileSha(path) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}?ref=${CONFIG.BRANCH}`;
-  const res = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    }
-  });
-  
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}` } });
   if (!res.ok) return null;
-  
   const data = await res.json();
   return data.sha;
 }
 
-async function putFile(path, content, message, existingSha = null) {
+async function putFile(path, content, message, sha = null) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
-  const body = {
-    message,
-    content: Buffer.from(content, 'utf8').toString('base64'),
-    branch: CONFIG.BRANCH
-  };
+  const body = { message, content: Buffer.from(content).toString('base64'), branch: CONFIG.BRANCH };
+  if (sha) body.sha = sha;
   
-  if (existingSha) body.sha = existingSha;
-
   const res = await fetch(url, {
     method: 'PUT',
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    },
+    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`❌ Erro ao PUT ${path}: ${res.status} - ${txt}`);
-  }
-
+  if (!res.ok) throw new Error(`Erro PUT ${path}: ${res.statusText}`);
   return res.json();
 }
 
 async function deleteFile(path, message) {
   const sha = await getFileSha(path);
-  if (!sha) throw new Error(`❌ Arquivo para deletar não encontrado: ${path}`);
-
+  if (!sha) throw new Error(`Arquivo não existe: ${path}`);
+  
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
-  const body = {
-    message,
-    sha,
-    branch: CONFIG.BRANCH
-  };
-
   const res = await fetch(url, {
     method: 'DELETE',
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    },
-    body: JSON.stringify(body)
+    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, sha, branch: CONFIG.BRANCH })
   });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`❌ Erro ao DELETE ${path}: ${res.status} - ${txt}`);
-  }
-
   return res.json();
 }
 
 async function commentOnIssue(number, body) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments`;
-  const res = await fetch(url, {
+  await fetch(url, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    },
+    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ body })
   });
-  
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`❌ Erro ao comentar na issue #${number}: ${res.status} - ${txt}`);
-  }
-  
-  return res.json();
 }
 
-async function updateIssueState(number, state, stateReason) {
+async function updateIssueState(number, state, reason) {
   const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}`;
-  const body = { state };
-  if (stateReason) body.state_reason = stateReason;
-
-  const res = await fetch(url, {
+  await fetch(url, {
     method: 'PATCH',
-    headers: {
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    },
-    body: JSON.stringify(body)
+    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state, state_reason: reason })
   });
-  
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`❌ Erro ao atualizar estado da issue #${number}: ${res.status} - ${txt}`);
-  }
-  
-  return res.json();
 }
 
 // ============================================================================
-// LÓGICA DE PROCESSAMENTO COM GEMINI
+// 🤖 LÓGICA PRINCIPAL
 // ============================================================================
 
 function extractJson(text) {
   try {
-    const codeBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
-    if (codeBlockMatch) {
-      return JSON.parse(codeBlockMatch[1].trim());
-    }
-    return JSON.parse(text.trim());
-  } catch (e) {
-    console.error('❌ Erro ao parsear JSON do Gemini:', e.message);
-    console.error('Resposta recebida:', text.substring(0, 500));
-    throw new Error('Gemini não retornou JSON válido');
-  }
-}
-
-async function planIssueWithAI(issue, comments) {
-  const commentsText = buildCommentsText(comments);
-
-  const prompt = `
-ISSUE #${issue.number}
-==================
-Título: ${issue.title}
-
-Descrição:
-${issue.body || '(sem descrição)'}
-
-Comentários:
-${commentsText}
-
-==================
-INSTRUÇÕES: Gere o JSON de plano de ações exatamente no schema fornecido no system prompt.
-Responda APENAS com o JSON, sem texto adicional antes ou depois.
-`;
-
-  console.log(`🤖 Consultando Gemini para issue #${issue.number}...`);
-  
-  try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    const plan = extractJson(text);
-    
-    console.log(`✅ Plano gerado para issue #${issue.number}:`, JSON.stringify(plan.tasks_summary, null, 2));
-    
-    return plan;
-  } catch (e) {
-    console.error(`❌ Erro ao planejar issue #${issue.number}:`, e.message);
-    throw e;
-  }
+    const match = text.match(/```json([\s\S]*?)```/i);
+    return JSON.parse(match ? match[1] : text);
+  } catch (e) { return null; }
 }
 
 async function processIssue(issue) {
-  if (processedIssues.has(issue.id)) {
-    console.log(`⏭️  Issue #${issue.number} já processada nesta execução.`);
-    return;
-  }
+  if (processedIssues.has(issue.id)) return;
 
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`📝 Processando issue #${issue.number}: "${issue.title}"`);
-  console.log(`${'='.repeat(60)}`);
-
+  addLog('📝', `Analisando Issue #${issue.number}: "${issue.title}"`);
+  
   try {
     const comments = await fetchIssueComments(issue.number);
-    console.log(`💬 ${comments.length} comentário(s) encontrado(s)`);
-
-    const plan = await planIssueWithAI(issue, comments);
+    const commentsText = comments.map(c => `${c.user.login}: ${c.body}`).join('\n');
+    
+    const prompt = `ISSUE #${issue.number}\nTítulo: ${issue.title}\nDesc: ${issue.body}\nComentários:\n${commentsText}\n\nGere o JSON de ação.`;
+    
+    const result = await model.generateContent(prompt);
+    const plan = extractJson(result.response.text());
+    
+    if (!plan) throw new Error("Gemini não retornou JSON válido.");
+    addLog('🧠', `Plano gerado: ${plan.tasks_summary.join(', ')}`);
 
     if (CONFIG.DRY_RUN) {
-      console.log('🔍 DRY RUN MODE - Nenhuma ação será executada');
-      console.log('Plano:', JSON.stringify(plan, null, 2));
+      addLog('🛑', 'DRY RUN: Ações simuladas (nada executado).');
       processedIssues.add(issue.id);
       return;
     }
 
-    const created = [];
-    const updated = [];
-    const deleted = [];
-    const commitLinks = [];
-    const errors = [];
-
+    let logs = [];
     for (const action of plan.actions || []) {
-      const { type, path, content, description } = action;
-
-      try {
-        console.log(`⚙️  Executando: ${type} em "${path}"`);
-
-        if (type === 'create_file') {
-          const result = await putFile(
-            path,
-            content || '',
-            `🤖 Criar ${path} - Issue #${issue.number}`
-          );
-          created.push({ path, description });
-          commitLinks.push(result.commit.html_url);
-          console.log(`✅ Arquivo criado: ${path}`);
-          
-        } else if (type === 'update_file') {
-          const sha = await getFileSha(path);
-          if (!sha) {
-            throw new Error(`Arquivo não encontrado: ${path}`);
-          }
-          const result = await putFile(
-            path,
-            content || '',
-            `🤖 Atualizar ${path} - Issue #${issue.number}`,
-            sha
-          );
-          updated.push({ path, description });
-          commitLinks.push(result.commit.html_url);
-          console.log(`✅ Arquivo atualizado: ${path}`);
-          
-        } else if (type === 'delete_file') {
-          const result = await deleteFile(
-            path,
-            `🤖 Remover ${path} - Issue #${issue.number}`
-          );
-          deleted.push({ path, description });
-          commitLinks.push(result.commit.html_url);
-          console.log(`✅ Arquivo deletado: ${path}`);
-          
-        } else {
-          console.warn(`⚠️  Tipo de ação não suportado: ${type}`);
-        }
-
-        await new Promise(r => setTimeout(r, 1000));
-        
-      } catch (e) {
-        const errorMsg = `Erro em ${type} "${path}": ${e.message}`;
-        console.error(`❌ ${errorMsg}`);
-        errors.push(errorMsg);
+      if (action.type === 'create_file') {
+        await putFile(action.path, action.content, `Criar ${action.path} #${issue.number}`);
+        logs.push(`- Criado: \`${action.path}\``);
+        addLog('✅', `Arquivo criado: ${action.path}`);
+        botStatus.stats.created++;
+      } else if (action.type === 'update_file') {
+        const sha = await getFileSha(action.path);
+        await putFile(action.path, action.content, `Update ${action.path} #${issue.number}`, sha);
+        logs.push(`- Editado: \`${action.path}\``);
+        addLog('✏️', `Arquivo atualizado: ${action.path}`);
+        botStatus.stats.updated++;
+      } else if (action.type === 'delete_file') {
+        await deleteFile(action.path, `Delete ${action.path} #${issue.number}`);
+        logs.push(`- Deletado: \`${action.path}\``);
+        addLog('🗑️', `Arquivo deletado: ${action.path}`);
+        botStatus.stats.deleted++;
       }
     }
 
-    let summaryComment = `## 🤖 Automação Executada\n\n`;
-    summaryComment += `${plan.final_comment}\n\n`;
-    summaryComment += `---\n\n`;
+    const finalBody = `## 🤖 Automação Concluída\n\n${plan.final_comment}\n\n### Ações:\n${logs.join('\n')}`;
+    await commentOnIssue(issue.number, finalBody);
     
-    if (created.length > 0) {
-      summaryComment += `### ✅ Arquivos Criados (${created.length})\n`;
-      summaryComment += created.map(f => `- \`${f.path}\` ${f.description ? `- ${f.description}` : ''}`).join('\n');
-      summaryComment += '\n\n';
+    if (plan.close_issue) {
+      await updateIssueState(issue.number, 'closed', 'completed');
+      addLog('🔒', `Issue #${issue.number} fechada.`);
     }
     
-    if (updated.length > 0) {
-      summaryComment += `### 📝 Arquivos Modificados (${updated.length})\n`;
-      summaryComment += updated.map(f => `- \`${f.path}\` ${f.description ? `- ${f.description}` : ''}`).join('\n');
-      summaryComment += '\n\n';
-    }
-    
-    if (deleted.length > 0) {
-      summaryComment += `### 🗑️ Arquivos Deletados (${deleted.length})\n`;
-      summaryComment += deleted.map(f => `- \`${f.path}\` ${f.description ? `- ${f.description}` : ''}`).join('\n');
-      summaryComment += '\n\n';
-    }
-
-    if (commitLinks.length > 0) {
-      summaryComment += `### 🔗 Commits\n`;
-      summaryComment += commitLinks.map((l, i) => `${i + 1}. ${l}`).join('\n');
-      summaryComment += '\n\n';
-    }
-    
-    if (errors.length > 0) {
-      summaryComment += `### ⚠️ Erros Encontrados\n`;
-      summaryComment += errors.map(e => `- ${e}`).join('\n');
-      summaryComment += '\n\n';
-    }
-
-    const totalActions = created.length + updated.length + deleted.length;
-    summaryComment += `\n_Processado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}_`;
-
-    await commentOnIssue(issue.number, summaryComment);
-    console.log(`💬 Comentário adicionado à issue #${issue.number}`);
-
-    if (plan.close_issue && totalActions > 0) {
-      await updateIssueState(issue.number, 'closed', plan.state_reason || 'completed');
-      console.log(`🔒 Issue #${issue.number} fechada com estado: ${plan.state_reason || 'completed'}`);
-    }
-
     processedIssues.add(issue.id);
-    console.log(`✅ Issue #${issue.number} processada com sucesso!`);
-
-  } catch (e) {
-    console.error(`❌ Erro ao processar issue #${issue.number}:`, e.message);
     
-    try {
-      await commentOnIssue(
-        issue.number,
-        `## ❌ Erro no Processamento\n\nO bot encontrou um erro ao processar esta issue:\n\n\`\`\`\n${e.message}\n\`\`\`\n\nPor favor, verifique a issue e tente novamente.`
-      );
-    } catch (commentError) {
-      console.error(`❌ Não foi possível comentar o erro na issue:`, commentError.message);
-    }
+  } catch (e) {
+    addLog('❌', `Erro na issue #${issue.number}: ${e.message}`);
+    botStatus.stats.errors++;
+    await commentOnIssue(issue.number, `⚠️ Erro no processamento: ${e.message}`);
   }
 }
-
-// ============================================================================
-// LOOP PRINCIPAL
-// ============================================================================
 
 async function loop() {
-  const startTime = Date.now();
-  console.log(`\n${'#'.repeat(70)}`);
-  console.log(`🔄 Verificação iniciada: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
-  console.log(`${'#'.repeat(70)}`);
-  
   try {
+    addLog('🔄', 'Buscando issues abertas...');
     const issues = await fetchOpenIssues();
     
-    if (!issues.length) {
-      console.log('✨ Nenhuma issue aberta encontrada.');
-      return;
+    if (issues.length === 0) {
+      addLog('💤', 'Nenhuma issue pendente.');
+    } else {
+      addLog('📋', `Encontradas ${issues.length} issue(s).`);
+      for (const issue of issues) await processIssue(issue);
     }
-    
-    console.log(`📋 ${issues.length} issue(s) aberta(s) encontrada(s)`);
-    
-    for (const issue of issues) {
-      await processIssue(issue);
-    }
-    
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n✅ Verificação concluída em ${duration}s`);
-    
   } catch (e) {
-    console.error('❌ Erro no loop principal:', e.message);
-    console.error(e.stack);
+    addLog('💥', `Erro no loop: ${e.message}`);
+    botStatus.stats.errors++;
   }
 }
 
 // ============================================================================
-// INICIALIZAÇÃO
+// 🚀 STARTUP
 // ============================================================================
 
-console.log(`
-${'═'.repeat(70)}
-🤖 BOT DE AUTOMAÇÃO GITHUB + GEMINI AI
-${'═'.repeat(70)}
-Repositório: ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}
-Branch: ${CONFIG.BRANCH}
-Intervalo: ${CONFIG.CHECK_INTERVAL / 1000}s (${CONFIG.CHECK_INTERVAL / 60000} minutos)
-Dry Run: ${CONFIG.DRY_RUN ? 'ATIVADO' : 'DESATIVADO'}
-Porta Web: ${CONFIG.PORT}
-${'═'.repeat(70)}
-`);
-
-await loop();
-setInterval(loop, CONFIG.CHECK_INTERVAL);
-
-process.on('SIGTERM', () => {
-  console.log('\n🛑 Recebido sinal de encerramento (SIGTERM)...');
-  server.close();
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('\n🛑 Recebido sinal de encerramento (SIGINT)...');
-  server.close();
-  process.exit(0);
+app.listen(PORT, () => {
+  console.log(`Web server rodando na porta ${PORT}`);
+  addLog('🚀', `Sistema iniciado no repositório ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}`);
+  
+  loop();
+  setInterval(loop, CONFIG.CHECK_INTERVAL);
 });
