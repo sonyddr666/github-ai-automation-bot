@@ -1,423 +1,453 @@
-import fetch from 'node-fetch';
 import express from 'express';
+import fetch from 'node-fetch';
+import bodyParser from 'body-parser';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import Ajv from 'ajv';
+import 'dotenv/config'; // Carrega variáveis do .env localmente
 
-// ============================================================================
-// CONFIGURAÇÃO
-// ============================================================================
-const app = express();
-const PORT = process.env.PORT || 3000;
-
+// ------------------------- Config -------------------------
 const CONFIG = {
-  GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-  REPO_OWNER: 'sonyddr666',
-  REPO_NAME: 'teste',
-  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10), // 5 min
-  BRANCH: process.env.BRANCH || 'main',
-  DRY_RUN: process.env.DRY_RUN === 'true'
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    REPO_OWNER: process.env.REPO_OWNER || 'sonyddr666',
+    REPO_NAME: process.env.REPO_NAME || 'teste',
+    CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '300000', 10),
+    BRANCH: process.env.BRANCH || 'main',
+    DRY_RUN: (process.env.DRY_RUN || 'false') === 'true',
+    MAX_ACTIONS: parseInt(process.env.MAX_ACTIONS || '20', 10),
+    MAX_FILE_SIZE_BYTES: parseInt(process.env.MAX_FILE_SIZE_BYTES || '200000', 10),
+    USE_PULL_REQUEST: (process.env.USE_PULL_REQUEST || 'false') === 'true',
+    PORT: parseInt(process.env.PORT || '10000', 10)
 };
+const REQUIRED = ['GITHUB_TOKEN', 'GEMINI_API_KEY'];
+const missing = REQUIRED.filter(k => !CONFIG[k]);
+if (missing.length) console.warn('Missing env:', missing.join(', '));
 
-// Validação
-const required = ['GITHUB_TOKEN', 'GEMINI_API_KEY'];
-const missing = required.filter(k => !CONFIG[k]);
+const app = express();
+app.use(bodyParser.json());
+app.use('/dashboard', express.static('public'));
 
-// ============================================================================
-// 🧠 MEMÓRIA DO DASHBOARD
-// ============================================================================
-let botStatus = {
-  lastRun: new Date(),
-  status: "Iniciando sistema...",
-  logs: [],
-  active: true,
-  stats: { created: 0, updated: 0, deleted: 0, errors: 0 }
+// ------------------------- State -------------------------
+const botState = {
+    status: 'Inicializando...',
+    lastRun: new Date().toISOString(),
+    online: false,
+    stats: { created: 0, updated: 0, deleted: 0, errors: 0 },
+    logs: []
 };
+const subscribers = new Set(); // SSE clients
+const processedIssues = new Set(); // idempotência por execução
+const commitLinks = []; // últimos commits
 
-function addLog(emoji, message) {
-  const time = new Date().toLocaleTimeString('pt-BR');
-  console.log(`${emoji} ${message}`);
-  
-  botStatus.logs.unshift({ time, emoji, message });
-  if (botStatus.logs.length > 50) botStatus.logs.pop();
-  
-  botStatus.lastRun = new Date();
-  botStatus.status = message;
+function nowBR() {
+    return new Date().toLocaleTimeString('pt-BR', { hour12: false });
+}
+function pushLog(emoji, message) {
+    console.log(`${emoji} ${message}`);
+    botState.logs.unshift({ time: nowBR(), emoji, message });
+    while (botState.logs.length > 500) botState.logs.pop();
+    broadcast({ type: 'log', time: nowBR(), emoji, message });
+}
+function tickOnline() {
+    botState.lastRun = new Date().toISOString();
+    botState.online = true;
+    broadcast({ type: 'stats', stats: botState.stats, lastRun: botState.lastRun, online: botState.online });
+}
+function broadcast(data) {
+    const payload = `data: ${JSON.stringify(data)}\n\n`;
+    for (const res of subscribers) res.write(payload);
 }
 
-if (missing.length) {
-  addLog('❌', `Faltam variáveis: ${missing.join(', ')}`);
-}
-
-// ============================================================================
-// 🌐 SERVIDOR WEB (DASHBOARD)
-// ============================================================================
-
-app.get('/', (req, res) => {
-  const timeAgo = Math.floor((new Date() - botStatus.lastRun) / 1000);
-  
-  const html = `
-  <!DOCTYPE html>
-  <html lang="pt-BR">
-  <head>
-    <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="30">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🤖 Bot Dashboard</title>
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: linear-gradient(135deg, #0d1117 0%, #161b22 100%); color: #c9d1d9; font-family: 'Segoe UI', system-ui, sans-serif; padding: 20px; min-height: 100vh; }
-      .container { max-width: 900px; margin: 0 auto; }
-      .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-      .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #30363d; padding-bottom: 16px; margin-bottom: 20px; }
-      h1 { margin: 0; font-size: 26px; color: #58a6ff; display: flex; align-items: center; gap: 10px; }
-      .status-badge { background: linear-gradient(135deg, #238636 0%, #2ea043 100%); color: white; padding: 6px 16px; border-radius: 20px; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; box-shadow: 0 2px 8px rgba(35,134,54,0.3); }
-      .info-row { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 14px; padding: 8px 0; }
-      .label { color: #8b949e; font-weight: 500; }
-      .value { color: #fff; font-weight: bold; }
-      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-top: 20px; }
-      .stat-box { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
-      .stat-number { font-size: 28px; font-weight: bold; color: #58a6ff; }
-      .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-      .log-item { display: flex; padding: 10px 0; border-bottom: 1px solid #21262d; font-size: 13px; align-items: center; }
-      .log-time { color: #8b949e; min-width: 85px; font-family: 'Courier New', monospace; font-size: 12px; }
-      .log-msg { margin-left: 12px; line-height: 1.5; }
-      .repo-link { color: #58a6ff; text-decoration: none; font-weight: 500; transition: color 0.2s; }
-      .repo-link:hover { color: #79c0ff; }
-      h3 { color: #c9d1d9; font-size: 18px; margin-bottom: 16px; }
-      .footer { text-align: center; color: #484f58; font-size: 11px; margin-top: 30px; padding: 20px 0; border-top: 1px solid #21262d; }
-      .pulse { animation: pulse 2s infinite; }
-      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="card">
-        <div class="header">
-          <h1><span class="pulse">🤖</span> GitHub AI Automation</h1>
-          <span class="status-badge">ONLINE</span>
-        </div>
-        <div class="info-row">
-          <span class="label">Status Atual:</span>
-          <span class="value" style="color: #79c0ff">${botStatus.status}</span>
-        </div>
-        <div class="info-row">
-          <span class="label">Última Atividade:</span>
-          <span class="value">${timeAgo}s atrás</span>
-        </div>
-        <div class="info-row">
-          <span class="label">Repositório:</span>
-          <a href="https://github.com/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}" class="repo-link" target="_blank">${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}</a>
-        </div>
-        <div class="info-row">
-          <span class="label">Modelo AI:</span>
-          <span class="value" style="color: #22c55e">Gemini 2.5 Flash ⚡</span>
-        </div>
-        
-        <div class="stats-grid">
-          <div class="stat-box">
-            <div class="stat-number" style="color: #2ea043">${botStatus.stats.created}</div>
-            <div class="stat-label">Criados</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-number" style="color: #58a6ff">${botStatus.stats.updated}</div>
-            <div class="stat-label">Editados</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-number" style="color: #f85149">${botStatus.stats.deleted}</div>
-            <div class="stat-label">Deletados</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-number" style="color: #d29922">${botStatus.stats.errors}</div>
-            <div class="stat-label">Erros</div>
-          </div>
-        </div>
-      </div>
-
-      <h3>📜 Log de Atividades</h3>
-      <div class="card">
-        ${botStatus.logs.map(log => `
-          <div class="log-item">
-            <div class="log-time">${log.time}</div>
-            <div class="log-msg">${log.emoji} ${log.message}</div>
-          </div>
-        `).join('')}
-        ${botStatus.logs.length === 0 ? '<div style="padding:20px; color:#8b949e; text-align:center">Aguardando primeira execução...</div>' : ''}
-      </div>
-      
-      <div class="footer">
-        Atualiza automaticamente a cada 30s • Powered by Gemini 2.5 Flash
-      </div>
-    </div>
-  </body>
-  </html>
-  `;
-  res.send(html);
+// ------------------------- SSE & Endpoints -------------------------
+app.get('/events', (req, res) => {
+    res.status(200).set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive'
+    });
+    res.flushHeaders();
+    res.write(`data: ${JSON.stringify({ type: 'stats', stats: botState.stats, lastRun: botState.lastRun, online: botState.online })}\n\n`);
+    subscribers.add(res);
+    req.on('close', () => subscribers.delete(res));
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.get('/meta', (req, res) => {
+    res.json({
+        repoOwner: CONFIG.REPO_OWNER,
+        repoName: CONFIG.REPO_NAME,
+        branch: CONFIG.BRANCH,
+        aiModel: 'gemini-2.5-flash',
+        online: botState.online
+    });
+});
 
-// ============================================================================
-// 🧠 SETUP GEMINI & AI
-// ============================================================================
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        lastRun: botState.lastRun,
+        stats: botState.stats,
+        online: botState.online,
+        dryRun: CONFIG.DRY_RUN
+    });
+});
 
-const SYSTEM_PROMPT = `Você é um agente de automação GitHub para o repositório ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}.
-REGRAS:
-- Leia TÍTULO, DESCRIÇÃO e COMENTÁRIOS da issue.
-- Ao EDITAR arquivos existentes, você receberá o CONTEÚDO ATUAL do arquivo para fazer alterações precisas.
-- Identifique tarefas (criar, modificar, deletar arquivos).
-- NÃO peça confirmação.
-- RESPONDA APENAS JSON VÁLIDO neste schema:
+app.get('/dashboard', (req, res) => {
+    res.sendFile(process.cwd() + '/public/dashboard.html');
+});
+
+// Opcional: Webhook do GitHub para issues (configure o webhook no repositório)
+app.post('/webhook', async (req, res) => {
+    const ev = req.headers['x-github-event'];
+    if (ev === 'issues' && (req.body.action === 'opened' || req.body.action === 'edited' || req.body.action === 'reopened')) {
+        pushLog('📬', `Webhook recebido: issue #${req.body.issue.number} ${req.body.action}`);
+        processSingleIssue(req.body.issue).catch(e => pushLog('❌', `Erro webhook: ${e.message}`));
+    }
+    res.status(200).end();
+});
+
+// ------------------------- Helpers: HTTP com retry -------------------------
+async function httpJson(url, opts = {}, retries = 3, backoffMs = 800) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        const res = await fetch(url, opts);
+        if (res.ok) return res.json();
+        const txt = await res.text();
+        if (attempt === retries || ![429, 500, 502, 503, 504].includes(res.status)) {
+            throw new Error(`HTTP ${res.status} ${res.statusText} - ${txt.slice(0, 250)}`);
+        }
+        await new Promise(r => setTimeout(r, backoffMs * (attempt + 1)));
+    }
+}
+
+const ghHeaders = {
+    Authorization: `Bearer ${CONFIG.GITHUB_TOKEN}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+};
+
+// ------------------------- GitHub APIs -------------------------
+async function listOpenIssues() {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues?state=open&per_page=50`;
+    const data = await httpJson(url, { headers: ghHeaders });
+    return data.filter(i => !i.pull_request);
+}
+async function listIssueComments(number) {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments?per_page=50`;
+    return httpJson(url, { headers: ghHeaders }).catch(() => []);
+}
+async function getFile(path) {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}?ref=${CONFIG.BRANCH}`;
+    const res = await fetch(url, { headers: ghHeaders });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Get file ${path}: ${res.statusText}`);
+    const data = await res.json();
+    const content = data.content ? Buffer.from(data.content, 'base64').toString('utf-8') : '';
+    return { content, sha: data.sha };
+}
+async function putFile(path, content, message, sha = null) {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
+    const body = { message, content: Buffer.from(content).toString('base64'), branch: CONFIG.BRANCH };
+    if (sha) body.sha = sha;
+    const data = await httpJson(url, { method: 'PUT', headers: { ...ghHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (data && data.commit && data.commit.html_url) commitLinks.unshift(data.commit.html_url);
+    return data;
+}
+async function deleteFile(path, message) {
+    const f = await getFile(path);
+    if (!f?.sha) throw new Error(`Arquivo não encontrado: ${path}`);
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
+    const body = { message, sha: f.sha, branch: CONFIG.BRANCH };
+    const data = await httpJson(url, { method: 'DELETE', headers: { ...ghHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (data && data.commit && data.commit.html_url) commitLinks.unshift(data.commit.html_url);
+    return data;
+}
+async function createBranchIfNeeded(branch) {
+    const base = CONFIG.BRANCH;
+    if (branch === base) return;
+    // pega SHA do base
+    const refBase = await httpJson(`https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/git/ref/heads/${base}`, { headers: ghHeaders });
+    // tenta criar ref
+    await httpJson(
+        `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/git/refs`,
+        { method: 'POST', headers: { ...ghHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: refBase.object.sha }) }
+    ).catch(() => { }); // se já existir, ok
+}
+async function openPullRequest(headBranch, title, body) {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/pulls`;
+    return httpJson(url, {
+        method: 'POST',
+        headers: { ...ghHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, head: headBranch, base: CONFIG.BRANCH })
+    });
+}
+async function commentOnIssue(number, body) {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments`;
+    await httpJson(url, { method: 'POST', headers: { ...ghHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) });
+}
+async function closeIssue(number, reason = 'completed') {
+    const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}`;
+    await httpJson(url, { method: 'PATCH', headers: { ...ghHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ state: 'closed', state_reason: reason }) });
+}
+
+// ------------------------- AI (Gemini) -------------------------
+const SYSTEM_PROMPT = (owner, repo) => `
+Você é um agente de automação GitHub para o repositório ${owner}/${repo}.
+Regras:
+- Leia TÍTULO, DESCRIÇÃO e COMENTÁRIOS.
+- Para update_file, sempre forneça o CONTEÚDO COMPLETO resultante (não diff).
+- Responda apenas JSON válido no schema abaixo.
+Schema:
 {
-  "issue_number": <numero>,
-  "tasks_summary": ["resumo1"],
+  "issue_number": number,
+  "tasks_summary": string[],
   "actions": [
     {
       "type": "create_file" | "update_file" | "delete_file",
-      "path": "caminho/arquivo.ext",
-      "content": "CONTEUDO COMPLETO (obrigatório para create/update)",
-      "description": "descricao"
+      "path": "string",
+      "content": "string (obrigatório p/ create/update)",
+      "description": "string"
     }
   ],
-  "final_comment": "Markdown do que foi feito",
-  "close_issue": true,
-  "state_reason": "completed"
+  "final_comment": "string (markdown)",
+  "close_issue": boolean,
+  "state_reason": "completed" | "not_planned"
 }
-Para HTML/CSS/JS, gere código completo e funcional.`;
+Limites:
+- No máximo 20 ações.
+- Evite tocar fora do projeto (paths relativos sob o repo).
+- Para HTML/CSS/JS, gere arquivos funcionais e autocontidos quando possível.
+`;
 
-let model;
-try {
-  const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_API_KEY);
-  model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    systemInstruction: SYSTEM_PROMPT
-  });
-  addLog('🧠', 'Gemini 2.5 Flash carregado com sucesso');
-} catch (e) {
-  addLog('❌', 'Erro ao iniciar Gemini: ' + e.message);
-}
+const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', systemInstruction: SYSTEM_PROMPT(CONFIG.REPO_OWNER, CONFIG.REPO_NAME) });
 
-const processedIssues = new Set();
+// ------------------------- Validation -------------------------
+const planSchema = {
+    type: 'object',
+    required: ['issue_number', 'tasks_summary', 'actions', 'final_comment', 'close_issue', 'state_reason'],
+    properties: {
+        issue_number: { type: 'number' },
+        tasks_summary: { type: 'array', items: { type: 'string' }, maxItems: CONFIG.MAX_ACTIONS },
+        actions: {
+            type: 'array',
+            maxItems: CONFIG.MAX_ACTIONS,
+            items: {
+                type: 'object',
+                required: ['type', 'path'],
+                properties: {
+                    type: { type: 'string', enum: ['create_file', 'update_file', 'delete_file'] },
+                    path: { type: 'string', minLength: 1 },
+                    content: { type: 'string' },
+                    description: { type: 'string' }
+                }
+            }
+        },
+        final_comment: { type: 'string' },
+        close_issue: { type: 'boolean' },
+        state_reason: { type: 'string', enum: ['completed', 'not_planned'] }
+    }
+};
+const ajv = new Ajv({ allErrors: true, strict: false });
+const validatePlan = ajv.compile(planSchema);
 
-// ============================================================================
-// ⚙️ FUNÇÕES GITHUB
-// ============================================================================
-
-async function fetchOpenIssues() {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues?state=open`;
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
-  });
-  if (!res.ok) throw new Error(`Github Issues Error: ${res.status}`);
-  const data = await res.json();
-  return data.filter(i => !i.pull_request);
-}
-
-async function fetchIssueComments(number) {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments`;
-  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Accept': 'application/vnd.github+json' } });
-  return res.ok ? res.json() : [];
-}
-
-async function getFileContent(path) {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}?ref=${CONFIG.BRANCH}`;
-  const res = await fetch(url, { 
-    headers: { 
-      'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`,
-      'Accept': 'application/vnd.github+json'
-    } 
-  });
-  
-  if (!res.ok) return null;
-  
-  const data = await res.json();
-  
-  // Decodifica o conteúdo de base64 para texto
-  if (data.content) {
-    const content = Buffer.from(data.content, 'base64').toString('utf-8');
-    return { content, sha: data.sha };
-  }
-  
-  return null;
+function safePath(p) {
+    // bloqueia diretórios pai e caminhos absolutos
+    return p && !p.includes('..') && !p.startsWith('/') && !p.startsWith('\\');
 }
 
-async function getFileSha(path) {
-  const fileData = await getFileContent(path);
-  return fileData ? fileData.sha : null;
+// ------------------------- Contexto Inteligente -------------------------
+function extractMentionedFiles(text) {
+    const fileRegex = /([\w\-./]+?\.(html|css|js|json|md|txt|py|java|cpp|c|h|php|rb|go|rs|ts|jsx|tsx|vue|xml|yaml|yml))/gi;
+    return Array.from(new Set((text.match(fileRegex) || [])));
 }
+async function buildIssueContext(issue, comments) {
+    const body = issue.body || '';
+    const ctext = (comments || []).map(c => `${c.user?.login || 'user'}: ${c.body}`).join('\n');
+    const mentioned = extractMentionedFiles(`${issue.title}\n${body}\n${ctext}`).slice(0, 15);
+    let context = `ISSUE #${issue.number}\nTÍTULO: ${issue.title}\nDESCRIÇÃO:\n${body}\n\nCOMENTÁRIOS:\n${ctext}\n`;
 
-async function putFile(path, content, message, sha = null) {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
-  const body = { message, content: Buffer.from(content).toString('base64'), branch: CONFIG.BRANCH };
-  if (sha) body.sha = sha;
-  
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) throw new Error(`Erro PUT ${path}: ${res.statusText}`);
-  return res.json();
-}
-
-async function deleteFile(path, message) {
-  const sha = await getFileSha(path);
-  if (!sha) throw new Error(`Arquivo não existe: ${path}`);
-  
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/contents/${encodeURIComponent(path)}`;
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, sha, branch: CONFIG.BRANCH })
-  });
-  return res.json();
-}
-
-async function commentOnIssue(number, body) {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}/comments`;
-  await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body })
-  });
-}
-
-async function updateIssueState(number, state, reason) {
-  const url = `https://api.github.com/repos/${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}/issues/${number}`;
-  await fetch(url, {
-    method: 'PATCH',
-    headers: { 'Authorization': `Bearer ${CONFIG.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state, state_reason: reason })
-  });
-}
-
-// ============================================================================
-// 🤖 LÓGICA PRINCIPAL COM CONTEXTO DE ARQUIVOS
-// ============================================================================
-
-function extractJson(text) {
-  try {
-    const match = text.match(/```json([\s\S]*?)```/i);
-    return JSON.parse(match ? match[1] : text);
-  } catch (e) { return null; }
-}
-
-async function detectFilesToRead(issue, comments) {
-  // Detecta nomes de arquivos mencionados na issue ou comentários
-  const text = `${issue.title} ${issue.body} ${comments.map(c => c.body).join(' ')}`;
-  const filePatterns = /([\w\-\.]+\.(html|css|js|json|md|txt|py|java|cpp|c|h|php|rb|go|rs|ts|jsx|tsx|vue|xml|yaml|yml))/gi;
-  const matches = text.match(filePatterns);
-  return matches ? [...new Set(matches)] : [];
-}
-
-async function processIssue(issue) {
-  if (processedIssues.has(issue.id)) return;
-
-  addLog('📝', `Analisando Issue #${issue.number}: "${issue.title}"`);
-  
-  try {
-    const comments = await fetchIssueComments(issue.number);
-    const commentsText = comments.map(c => `${c.user.login}: ${c.body}`).join('\n');
-    
-    // NOVO: Detecta e lê arquivos mencionados
-    const mentionedFiles = await detectFilesToRead(issue, comments);
-    let fileContexts = '';
-    
-    if (mentionedFiles.length > 0) {
-      addLog('📚', `Lendo ${mentionedFiles.length} arquivo(s) para contexto...`);
-      
-      for (const filename of mentionedFiles) {
-        const fileData = await getFileContent(filename);
-        if (fileData) {
-          fileContexts += `\n\n--- CONTEÚDO ATUAL DE ${filename} ---\n${fileData.content}\n--- FIM DE ${filename} ---\n`;
-          addLog('📄', `Arquivo lido: ${filename}`);
+    if (mentioned.length) {
+        context += `\nARQUIVOS MENCIONADOS (${mentioned.length}):\n`;
+        for (const path of mentioned) {
+            const f = await getFile(path).catch(() => null);
+            if (f?.content) {
+                const truncated = f.content.slice(0, CONFIG.MAX_FILE_SIZE_BYTES);
+                context += `\n--- INÍCIO ${path} ---\n${truncated}\n--- FIM ${path} ---\n`;
+            }
         }
-      }
     }
-    
-    const prompt = `ISSUE #${issue.number}\nTítulo: ${issue.title}\nDesc: ${issue.body}\nComentários:\n${commentsText}${fileContexts}\n\nGere o JSON de ação.`;
-    
-    const result = await model.generateContent(prompt);
-    const plan = extractJson(result.response.text());
-    
-    if (!plan) throw new Error("Gemini não retornou JSON válido.");
-    addLog('🧠', `Plano gerado: ${plan.tasks_summary.join(', ')}`);
+    return context;
+}
+function parseJsonResponse(txt) {
+    try {
+        const fenced = txt.match(/```json([\s\S]*?)```/i);
+        const raw = fenced ? fenced[1] : txt;
+        return JSON.parse(raw);
+    } catch { return null; }
+}
 
-    if (CONFIG.DRY_RUN) {
-      addLog('🛑', 'DRY RUN: Ações simuladas (nada executado).');
-      processedIssues.add(issue.id);
-      return;
+// ------------------------- Execução de Plano -------------------------
+async function executePlan(plan, issue) {
+    const results = [];
+    let headBranch = CONFIG.BRANCH;
+
+    if (CONFIG.USE_PULL_REQUEST) {
+        headBranch = `ai-bot/issue-${issue.number}-${Date.now()}`;
+        await createBranchIfNeeded(headBranch);
     }
 
-    let logs = [];
     for (const action of plan.actions || []) {
-      if (action.type === 'create_file') {
-        await putFile(action.path, action.content, `Criar ${action.path} #${issue.number}`);
-        logs.push(`- Criado: \`${action.path}\``);
-        addLog('✅', `Arquivo criado: ${action.path}`);
-        botStatus.stats.created++;
-      } else if (action.type === 'update_file') {
-        const sha = await getFileSha(action.path);
-        if (!sha) {
-          addLog('⚠️', `Arquivo ${action.path} não existe, criando...`);
-          await putFile(action.path, action.content, `Criar ${action.path} #${issue.number}`);
-          logs.push(`- Criado: \`${action.path}\` (não existia)`);
-          botStatus.stats.created++;
-        } else {
-          await putFile(action.path, action.content, `Update ${action.path} #${issue.number}`, sha);
-          logs.push(`- Editado: \`${action.path}\``);
-          addLog('✏️', `Arquivo atualizado: ${action.path}`);
-          botStatus.stats.updated++;
+        if (!safePath(action.path)) {
+            pushLog('⛔', `Path inseguro ignorado: ${action.path}`);
+            continue;
         }
-      } else if (action.type === 'delete_file') {
-        await deleteFile(action.path, `Delete ${action.path} #${issue.number}`);
-        logs.push(`- Deletado: \`${action.path}\``);
-        addLog('🗑️', `Arquivo deletado: ${action.path}`);
-        botStatus.stats.deleted++;
-      }
+        if (['create_file', 'update_file'].includes(action.type)) {
+            if (!action.content) {
+                pushLog('⚠️', `Sem conteúdo para ${action.type} em ${action.path}, ignorando`);
+                continue;
+            }
+            if (Buffer.byteLength(action.content, 'utf8') > CONFIG.MAX_FILE_SIZE_BYTES) {
+                pushLog('⚠️', `Arquivo grande demais (${action.path}), ignorando`);
+                continue;
+            }
+        }
+
+        try {
+            if (CONFIG.DRY_RUN) {
+                results.push(`(DRY_RUN) ${action.type} ${action.path}`);
+                continue;
+            }
+            const msg = `🤖 ${action.type} ${action.path} via issue #${issue.number}`;
+            if (action.type === 'create_file') {
+                const exists = await getFile(action.path);
+                await putFile(action.path, action.content, exists ? `Update ${action.path} (existia) - ${msg}` : `Create ${action.path} - ${msg}`, exists?.sha || null);
+                results.push(`Criado: \`${action.path}\``);
+                botState.stats.created++;
+            } else if (action.type === 'update_file') {
+                const exists = await getFile(action.path);
+                await putFile(action.path, action.content, `Update ${action.path} - ${msg}`, exists?.sha || null);
+                results.push(`Editado: \`${action.path}\``);
+                botState.stats.updated++;
+            } else if (action.type === 'delete_file') {
+                await deleteFile(action.path, `Delete ${action.path} - ${msg}`);
+                results.push(`Deletado: \`${action.path}\``);
+                botState.stats.deleted++;
+            }
+            tickOnline();
+            await new Promise(r => setTimeout(r, 1000)); // rate limit friendly
+        } catch (e) {
+            botState.stats.errors++;
+            results.push(`Erro em ${action.type} ${action.path}: ${e.message}`);
+            pushLog('❌', `Falha ${action.type} ${action.path}: ${e.message}`);
+        }
     }
 
-    const finalBody = `## 🤖 Automação Concluída\n\n${plan.final_comment}\n\n### Ações:\n${logs.join('\n')}`;
-    await commentOnIssue(issue.number, finalBody);
-    
-    if (plan.close_issue) {
-      await updateIssueState(issue.number, 'closed', 'completed');
-      addLog('🔒', `Issue #${issue.number} fechada.`);
+    let prUrl = '';
+    if (CONFIG.USE_PULL_REQUEST && !CONFIG.DRY_RUN) {
+        try {
+            const pr = await openPullRequest(headBranch, `🤖 Changes for #${issue.number}`, `Automação executada para a issue #${issue.number}.`);
+            prUrl = pr.html_url || '';
+            results.push(`PR aberto: ${prUrl}`);
+        } catch (e) {
+            pushLog('⚠️', `Não foi possível abrir PR: ${e.message}`);
+        }
     }
-    
-    processedIssues.add(issue.id);
-    
-  } catch (e) {
-    addLog('❌', `Erro na issue #${issue.number}: ${e.message}`);
-    botStatus.stats.errors++;
-    await commentOnIssue(issue.number, `⚠️ Erro no processamento: ${e.message}`);
-  }
+
+    return { results, prUrl, commits: commitLinks.slice(0, 5) };
 }
 
-async function loop() {
-  try {
-    addLog('🔄', 'Buscando issues abertas...');
-    const issues = await fetchOpenIssues();
-    
-    if (issues.length === 0) {
-      addLog('💤', 'Nenhuma issue pendente.');
-    } else {
-      addLog('📋', `Encontradas ${issues.length} issue(s).`);
-      for (const issue of issues) await processIssue(issue);
+// ------------------------- Pipeline por Issue -------------------------
+async function processSingleIssue(issue) {
+    const uniqueKey = `${issue.id}`;
+    if (processedIssues.has(uniqueKey)) return;
+    processedIssues.add(uniqueKey);
+
+    pushLog('📝', `Processando issue #${issue.number}: ${issue.title}`);
+    botState.status = `Issue #${issue.number}`;
+    tickOnline();
+
+    try {
+        const comments = await listIssueComments(issue.number);
+        const context = await buildIssueContext(issue, comments);
+
+        const prompt = `${context}\n\nGere o JSON do plano de ação conforme o schema.`;
+        const ai = await model.generateContent(prompt);
+        const text = ai.response.text();
+        const plan = parseJsonResponse(text);
+        if (!plan || !validatePlan(plan)) {
+            const errMsg = ajv.errorsText(validatePlan.errors || []);
+            throw new Error(`Plano inválido: ${errMsg || 'JSON parse error'}`);
+        }
+
+        // hard cap de ações
+        if ((plan.actions || []).length > CONFIG.MAX_ACTIONS) {
+            plan.actions = plan.actions.slice(0, CONFIG.MAX_ACTIONS);
+            pushLog('⚠️', `Ações truncadas para ${CONFIG.MAX_ACTIONS}`);
+        }
+
+        pushLog('🤖', `Plano: ${(plan.tasks_summary || []).join('; ') || 'sem resumo'}`);
+        const { results, prUrl, commits } = await executePlan(plan, issue);
+
+        if (!CONFIG.DRY_RUN) {
+            const summary = [
+                '## 🤖 Automação Executada',
+                '',
+                plan.final_comment || '',
+                '',
+                '### Ações',
+                ...results.map(r => `- ${r}`),
+                '',
+                commits.length ? '### Commits' : '',
+                ...commits.map((c, i) => `${i + 1}. ${c}`),
+                prUrl ? `\n🔗 PR: ${prUrl}` : ''
+            ].join('\n');
+
+            await commentOnIssue(issue.number, summary);
+            if (plan.close_issue) {
+                await closeIssue(issue.number, plan.state_reason || 'completed');
+                pushLog('🔒', `Issue #${issue.number} fechada (${plan.state_reason || 'completed'})`);
+            }
+        } else {
+            pushLog('🛑', `DRY_RUN ativo: nenhuma alteração realizada na issue #${issue.number}`);
+        }
+    } catch (e) {
+        botState.stats.errors++;
+        pushLog('💥', `Erro na issue #${issue.number}: ${e.message}`);
+        if (!CONFIG.DRY_RUN) {
+            await commentOnIssue(issue.number, `⚠️ Falha ao processar: ${e.message}`);
+        }
+    } finally {
+        tickOnline();
     }
-  } catch (e) {
-    addLog('💥', `Erro no loop: ${e.message}`);
-    botStatus.stats.errors++;
-  }
 }
 
-// ============================================================================
-// 🚀 STARTUP
-// ============================================================================
+async function mainLoop() {
+    try {
+        pushLog('🔄', 'Verificando issues abertas...');
+        const issues = await listOpenIssues();
+        if (!issues.length) {
+            pushLog('💤', 'Sem issues abertas.');
+            tickOnline();
+            return;
+        }
+        pushLog('📋', `Encontradas ${issues.length} issue(s).`);
+        for (const issue of issues) {
+            await processSingleIssue(issue);
+        }
+    } catch (e) {
+        botState.stats.errors++;
+        pushLog('💣', `Erro no loop: ${e.message}`);
+    } finally {
+        tickOnline();
+    }
+}
 
-app.listen(PORT, () => {
-  console.log(`Web server rodando na porta ${PORT}`);
-  addLog('🚀', `Sistema iniciado no repositório ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME}`);
-  
-  loop();
-  setInterval(loop, CONFIG.CHECK_INTERVAL);
+// ------------------------- Boot -------------------------
+app.listen(CONFIG.PORT, () => {
+    pushLog('🚀', `Servidor iniciado na porta ${CONFIG.PORT} — Repo ${CONFIG.REPO_OWNER}/${CONFIG.REPO_NAME} (branch ${CONFIG.BRANCH})`);
+    botState.status = 'Rodando';
+    tickOnline();
+    // start loop
+    mainLoop();
+    setInterval(mainLoop, CONFIG.CHECK_INTERVAL);
 });

@@ -1,18 +1,35 @@
 services:
   - type: web
     name: github-ai-automation-bot
-    runtime: node
+    env: node
     plan: free
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: npm ci
+    startCommand: node index.js
+    autoDeploy: true
     envVars:
       - key: GITHUB_TOKEN
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: REPO_OWNER
+        value: sonyddr666
+      - key: REPO_NAME
+        value: teste
       - key: CHECK_INTERVAL
-        value: 300000
+        value: "300000"
       - key: BRANCH
         value: main
       - key: DRY_RUN
-        value: false
+        value: "false"
+      - key: MAX_ACTIONS
+        value: "20"
+      - key: MAX_FILE_SIZE_BYTES
+        value: "200000" # 200 KB
+      - key: USE_PULL_REQUEST
+        value: "false"
+      - key: PORT
+        value: "10000"
+    routes:
+      - type: rewrite
+        source: /
+        destination: /dashboard

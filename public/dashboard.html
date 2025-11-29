@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>🤖 GitHub AI Bot - Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --muted: #8b949e;
+      --txt: #c9d1d9;
+      --blue: #58a6ff;
+      --green: #2ea043;
+      --red: #f85149;
+      --yellow: #d29922;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--txt); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; padding: 20px; }
+    .container { max-width: 1000px; margin: 0 auto; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; }
+    h1 { font-size: 22px; color: var(--blue); display: flex; gap: 8px; align-items: center; }
+    .badge { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+    .online { background: linear-gradient(135deg, #238636, #2ea043); color: #fff; }
+    .offline { background: linear-gradient(135deg, #6e7681, #484f58); color: #fff; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .stat { text-align: center; border: 1px solid var(--border); border-radius: 8px; padding: 16px; background: #0d1117; }
+    .stat .n { font-weight: 800; font-size: 28px; }
+    .stat .l { color: var(--muted); font-size: 12px; margin-top: 4px; text-transform: uppercase; }
+    .log { display: grid; gap: 8px; }
+    .log-item { display: grid; grid-template-columns: 90px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+    .muted { color: var(--muted); }
+    .footer { text-align: center; color: var(--muted); font-size: 12px; padding: 10px; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <h1>🤖 GitHub AI Automation Bot</h1>
+        <span id="badge" class="badge offline">OFFLINE</span>
+      </div>
+      <div id="info" class="grid" style="margin-bottom:12px">
+        <div><span class="muted">Repositório:</span> <a id="repo" target="_blank"></a></div>
+        <div><span class="muted">Branch:</span> <span id="branch" class="mono"></span></div>
+        <div><span class="muted">AI:</span> <span id="ai" class="mono"></span></div>
+        <div><span class="muted">Última Atividade:</span> <span id="last" class="mono"></span></div>
+      </div>
+      <div class="grid">
+        <div class="stat">
+          <div id="created" class="n" style="color: var(--green)">0</div>
+          <div class="l">Criados</div>
+        </div>
+        <div class="stat">
+          <div id="updated" class="n" style="color: var(--blue)">0</div>
+          <div class="l">Editados</div>
+        </div>
+        <div class="stat">
+          <div id="deleted" class="n" style="color: var(--red)">0</div>
+          <div class="l">Deletados</div>
+        </div>
+        <div class="stat">
+          <div id="errors" class="n" style="color: var(--yellow)">0</div>
+          <div class="l">Erros</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="header">
+        <h2>📜 Log em Tempo Real</h2>
+        <a href="/health" target="_blank">/health</a>
+      </div>
+      <div id="logs" class="log"></div>
+    </div>
+
+    <div class="footer">
+      Atualiza em tempo real via SSE • Powered by Gemini 2.5 Flash
+    </div>
+  </div>
+<script>
+  async function init() {
+    const meta = await fetch('/meta').then(r => r.json()).catch(() => null);
+    if (meta) {
+      document.getElementById('repo').href = `https://github.com/${meta.repoOwner}/${meta.repoName}`;
+      document.getElementById('repo').textContent = `${meta.repoOwner}/${meta.repoName}`;
+      document.getElementById('branch').textContent = meta.branch;
+      document.getElementById('ai').textContent = meta.aiModel;
+      document.getElementById('badge').textContent = meta.online ? 'ONLINE' : 'OFFLINE';
+      document.getElementById('badge').className = 'badge ' + (meta.online ? 'online' : 'offline');
+    }
+    const es = new EventSource('/events');
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === 'stats') {
+        document.getElementById('created').textContent = data.stats.created;
+        document.getElementById('updated').textContent = data.stats.updated;
+        document.getElementById('deleted').textContent = data.stats.deleted;
+        document.getElementById('errors').textContent = data.stats.errors;
+        document.getElementById('last').textContent = data.lastRun;
+        document.getElementById('badge').textContent = data.online ? 'ONLINE' : 'OFFLINE';
+        document.getElementById('badge').className = 'badge ' + (data.online ? 'online' : 'offline');
+      } else if (data.type === 'log') {
+        const el = document.createElement('div');
+        el.className = 'log-item';
+        el.innerHTML = `<div class="muted mono">${data.time}</div><div>${data.emoji} ${data.message}</div>`;
+        const logs = document.getElementById('logs');
+        logs.prepend(el);
+        while (logs.children.length > 200) logs.removeChild(logs.lastChild);
+      }
+    };
+  }
+  init();
+</script>
+</body>
+</html>
